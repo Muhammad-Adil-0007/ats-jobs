@@ -18,8 +18,10 @@ Add / fix companies in COMPANIES below. See "How to find the right config" at th
 
 import argparse
 import json
+import re
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -29,21 +31,41 @@ from bs4 import BeautifulSoup
 # CONFIG
 # ---------------------------------------------------------------------------
 
-# BROAD mode: any student / intern role in Germany is reported; data-related ones are marked with [*].
-# STRICT mode: only roles whose title contains one of KEYWORDS.
-STRICT = False
+# Jobs are matched against two profiles (your two CVs). A job is reported if it fits at least one,
+# and is tagged [DS], [DEV] or [DS+DEV] in the output. Set STRICT = False to also get untagged
+# student roles (marketing, finance, ...).
+STRICT = True
 
-KEYWORDS = ["data", "machine learning", "ml ", "ml/", "ai ", "ai/", "artificial intelligence", "analytics", "analyst",
-            "science", "scientist", "deep learning", "nlp", "llm", "computer vision", "statistic", "quant",
-            "business intelligence", "bi ", "mlops", "research", "python", "software", "engineer", "developer",
-            "backend", "cloud", "algorithm", "forecast", "modeling", "modelling", "optimization", "automation"]
-ROLE_WORDS = ["werkstudent", "working student", "praktikum", "praktikant", "intern", "internship", "student",
-              "studentische", "hilfskraft", "thesis", "masterarbeit", "bachelorarbeit", "abschlussarbeit",
-              "trainee", "graduate", "entry level", "junior"]
-LOCATION_WORDS = ["germany", "deutschland", " de", ", de", "nuremberg", "nürnberg", "erlangen", "herzogenaurach",
+PROFILES = {
+    "DS": [  # Data Science / ML CV
+        "data scien", "data analy", "data engineer", "data platform", "datenanalys", "datenwissenschaft",
+        "machine learning", "maschinelles lernen", "ml ", "ml/", "ml-", "mlops", "deep learning",
+        "artificial intelligence", "künstliche intelligenz", "ai ", "ai/", "ai-", "ki ", "ki-", "ki/",
+        "generative ai", "gen ai", "genai", "llm", "nlp", "natural language", "computer vision",
+        "time series", "anomaly", "predictive", "forecast", "analytics", "business intelligence", "bi ",
+        "statistic", "quant", "research", "pattern recognition", "signal processing", "python", "sql",
+        "big data", "algorithm", "model", "rag ", "chatbot",
+    ],
+    "DEV": [  # Full-stack / mobile CV
+        "flutter", "dart", "react", "mobile", "ios", "android", "app develop", "app-entwick", "frontend",
+        "front-end", "front end", "backend", "back-end", "back end", "full stack", "full-stack", "fullstack",
+        "software", "softwareentwick", "web develop", "webentwick", "javascript", "typescript", "python",
+        "fastapi", "api ", "apis", "rest", "firebase", "cloud", "devops", "engineer", "developer",
+        "entwickler", "programmier", "ui/ux", "ui ", "ux ",
+    ],
+}
+NEARBY = ["nuremberg", "nürnberg", "erlangen", "herzogenaurach", "fürth", "forchheim", "bamberg"]
+
+ROLE_WORDS = ["werkstudent", "werkstudentin", "working student", "praktikum", "praktikant", "praktikantin", "intern",
+              "internship", "student", "studentische", "hilfskraft", "thesis", "masterarbeit", "bachelorarbeit",
+              "abschlussarbeit", "trainee", "graduate", "entry level", "junior"]
+
+LOCATION_WORDS = ["germany", "deutschland", ", de", "deu", "nuremberg", "nürnberg", "erlangen", "herzogenaurach",
                   "fürth", "munich", "münchen", "berlin", "stuttgart", "frankfurt", "hamburg", "cologne", "köln",
-                  "düsseldorf", "ingolstadt", "walldorf", "heidelberg", "karlsruhe", "remote"]
-                  # set to [] to accept every location
+                  "düsseldorf", "ingolstadt", "walldorf", "heidelberg", "karlsruhe", "leipzig", "dresden",
+                  "augsburg", "dortmund", "münster", "potsdam", "garching", "mehrere standorte"]
+                  # matched as whole words (", de" = country code after a comma); set to [] to accept every location
+EXCLUDE_TITLE = ["internal", "international", "internet", "formula student", "intern-", "interne"]
 
 STATE_FILE = Path(__file__).with_name("seen_jobs.json")
 TIMEOUT = 20
@@ -325,30 +347,78 @@ FETCHERS = {
 # ---------------------------------------------------------------------------
 
 
-def is_data_role(job):
-    return any(k in job["title"].lower() for k in KEYWORDS)
+def _word_in(text, words):
+    """True if any of `words` appears in text as a whole word / phrase (not inside a longer word)."""
+    return any(re.search(r"(?<![a-zäöüß])" + re.escape(w) + r"(?![a-zäöüß])", text) for w in words)
+
+
+def profile_tags(job):
+    t = job["title"].lower() + " "
+    return [name for name, words in PROFILES.items() if any(w in t for w in words)]
+
+
+def is_nearby(job):
+    return any(w in job["location"].lower() for w in NEARBY)
 
 
 def matches(job):
     t = job["title"].lower()
+    # strip words like "internal"/"international" before looking for "intern"
+    t_clean = t
+    for x in EXCLUDE_TITLE:
+        t_clean = t_clean.replace(x, " ")
+    if not _word_in(t_clean, ROLE_WORDS):
+        return False
+    if STRICT and not profile_tags(job):
+        return False
     loc = job["location"].lower()
-    if not any(k in t for k in ROLE_WORDS):
-        return False
-    if STRICT and not is_data_role(job):
-        return False
-    if LOCATION_WORDS and not any(k in loc for k in LOCATION_WORDS):
+    if LOCATION_WORDS and not _word_in(loc, LOCATION_WORDS):
         return False
     return True
 
 
 def load_seen():
-    if STATE_FILE.exists():
-        return set(json.loads(STATE_FILE.read_text()))
-    return set()
+    """{job_id: first_seen_date_iso}. Old list-format state files are upgraded automatically."""
+    if not STATE_FILE.exists():
+        return {}
+    data = json.loads(STATE_FILE.read_text())
+    if isinstance(data, list):
+        today = datetime.now(timezone.utc).date().isoformat()
+        return {k: today for k in data}
+    return data
 
 
 def save_seen(seen):
-    STATE_FILE.write_text(json.dumps(sorted(seen), indent=1))
+    STATE_FILE.write_text(json.dumps(seen, indent=1, sort_keys=True))
+
+
+_MONTHS = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
+
+
+def posted_date(job, seen):
+    """Best-effort posting date. Falls back to the day we first saw the job."""
+    raw = (job.get("posted") or "").strip()
+    now = datetime.now(timezone.utc)
+    if raw:
+        m = re.match(r"(\d{4}-\d{2}-\d{2})", raw)                      # ISO 2026-08-28T...
+        if m:
+            return datetime.strptime(m.group(1), "%Y-%m-%d").date()
+        m = re.match(rf"({_MONTHS})[a-z]* (\d{{1,2}}),? (\d{{4}})", raw.lower())   # Aug 28, 2026
+        if m:
+            return datetime.strptime(f"{m.group(1)[:3]} {m.group(2)} {m.group(3)}", "%b %d %Y").date()
+        m = re.match(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", raw)             # 28.08.2026
+        if m:
+            return datetime.strptime(raw[:10], "%d.%m.%Y").date()
+        low = raw.lower()                                              # Workday: "Posted 3 Days Ago"
+        if "today" in low:
+            return now.date()
+        if "yesterday" in low:
+            return (now - timedelta(days=1)).date()
+        m = re.search(r"(\d+)\+? days? ago", low)
+        if m:
+            return (now - timedelta(days=int(m.group(1)))).date()
+    first = seen.get(job["id"])
+    return datetime.strptime(first, "%Y-%m-%d").date() if first else now.date()
 
 
 def main():
@@ -363,7 +433,8 @@ def main():
         return
 
     seen = load_seen()
-    new_jobs, errors = [], []
+    today = datetime.now(timezone.utc).date()
+    all_hits, errors = [], []
 
     for c in COMPANIES:
         fetcher = FETCHERS.get(c["type"])
@@ -378,30 +449,50 @@ def main():
         hits = [j for j in jobs if matches(j)]
         print(f"{c['name']:<22} ({c['type']:<15}) {len(jobs):>4} jobs, {len(hits):>3} match", file=sys.stderr)
         for j in hits:
-            if args.all or j["id"] not in seen:
-                j["company"] = c["name"]
-                j["source"] = "HTML" if c["type"] in ("successfactors", "html") else "API"
-                new_jobs.append(j)
-            seen.add(j["id"])
+            j["company"] = c["name"]
+            j["source"] = "HTML" if c["type"] in ("successfactors", "html") else "API"
+            j["is_new"] = args.all or j["id"] not in seen
+            j["date"] = posted_date(j, seen)
+            seen.setdefault(j["id"], today.isoformat())
+            all_hits.append(j)
         time.sleep(1)  # be polite
 
-    # data-related roles first, then everything else
-    new_jobs.sort(key=lambda j: (not is_data_role(j), j["company"], j["title"]))
+    # nearby first, then jobs matching both profiles, then DS, then DEV, then untagged
+    order = {"DS+DEV": 0, "DS": 1, "DEV": 2, "": 3}
+    all_hits.sort(key=lambda j: (not is_nearby(j), order["+".join(profile_tags(j))], j["company"], j["title"]))
 
-    print("\n" + "=" * 70)
-    if not new_jobs:
-        print("No new matching jobs.")
-    for j in new_jobs:
-        star = "[*] " if is_data_role(j) else ""
-        print(f"{star}[{j['company']} | {j['source']}] {j['title']}")
-        print(f"    {j['location']}  {j['posted']}")
-        print(f"    {j['url']}\n")
+    def age(j):
+        return (today - j["date"]).days
+
+    sections = [
+        ("NOT SEEN YET (new since last run)", [j for j in all_hits if j["is_new"]]),
+        ("LAST 3 DAYS",                        [j for j in all_hits if not j["is_new"] and age(j) <= 3]),
+        ("LAST 7 DAYS",                        [j for j in all_hits if not j["is_new"] and 3 < age(j) <= 7]),
+    ]
+    if not any(jobs for _, jobs in sections):
+        print("NOTHING_TO_REPORT")
+    for title, jobs in sections:
+        print("=" * 70)
+        print(f"{title}  ({len(jobs)})")
+        print("=" * 70)
+        if not jobs:
+            print("  none\n")
+        for j in jobs:
+            tag = "+".join(profile_tags(j)) or "other"
+            near = " NEAR YOU" if is_nearby(j) else ""
+            print(f"[{tag}]{near} [{j['company']} | {j['source']}] {j['title']}")
+            print(f"    {j['location']}  |  posted {j['date'].isoformat()}")
+            print(f"    {j['url']}\n")
 
     if errors:
         print("Errors (check config for these companies):", file=sys.stderr)
         for e in errors:
             print("  " + e, file=sys.stderr)
 
+    # forget ids not seen for 60 days so the state file doesn't grow forever
+    cutoff = (today - timedelta(days=60)).isoformat()
+    live = {j["id"] for j in all_hits}
+    seen = {k: v for k, v in seen.items() if k in live or v >= cutoff}
     if not args.all:
         save_seen(seen)
 
