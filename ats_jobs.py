@@ -1,5 +1,3 @@
-# ATS Jobs Module
-# This file contains the main logic for the ATS Jobs application
 #!/usr/bin/env python3
 """
 ats_jobs.py - Poll company ATS APIs *and* scrape HTML career pages for new
@@ -13,7 +11,7 @@ Usage:
     python ats_jobs.py --reset    # forget seen jobs
 
 Supported types:
-    API : workday, greenhouse, lever, smartrecruiters
+    API : workday, greenhouse, lever, smartrecruiters, ashby, personio
     HTML: successfactors (SAP career sites, e.g. jobs.siemens.com), html (generic, CSS selectors)
 Add / fix companies in COMPANIES below. See "How to find the right config" at the bottom.
 """
@@ -31,10 +29,21 @@ from bs4 import BeautifulSoup
 # CONFIG
 # ---------------------------------------------------------------------------
 
-KEYWORDS = ["data", "machine learning", "ml ", "ai ", "analytics", "analyst", "science"]
-ROLE_WORDS = ["werkstudent", "working student", "praktikum", "intern", "internship", "student", "thesis", "masterarbeit"]
-LOCATION_WORDS = []  # e.g. ["nuremberg", "nürnberg", "erlangen", "herzogenaurach", "munich", "münchen", "germany", "remote"]
-                     # leave empty to accept every location
+# BROAD mode: any student / intern role in Germany is reported; data-related ones are marked with [*].
+# STRICT mode: only roles whose title contains one of KEYWORDS.
+STRICT = False
+
+KEYWORDS = ["data", "machine learning", "ml ", "ml/", "ai ", "ai/", "artificial intelligence", "analytics", "analyst",
+            "science", "scientist", "deep learning", "nlp", "llm", "computer vision", "statistic", "quant",
+            "business intelligence", "bi ", "mlops", "research", "python", "software", "engineer", "developer",
+            "backend", "cloud", "algorithm", "forecast", "modeling", "modelling", "optimization", "automation"]
+ROLE_WORDS = ["werkstudent", "working student", "praktikum", "praktikant", "intern", "internship", "student",
+              "studentische", "hilfskraft", "thesis", "masterarbeit", "bachelorarbeit", "abschlussarbeit",
+              "trainee", "graduate", "entry level", "junior"]
+LOCATION_WORDS = ["germany", "deutschland", " de", ", de", "nuremberg", "nürnberg", "erlangen", "herzogenaurach",
+                  "fürth", "munich", "münchen", "berlin", "stuttgart", "frankfurt", "hamburg", "cologne", "köln",
+                  "düsseldorf", "ingolstadt", "walldorf", "heidelberg", "karlsruhe", "remote"]
+                  # set to [] to accept every location
 
 STATE_FILE = Path(__file__).with_name("seen_jobs.json")
 TIMEOUT = 20
@@ -43,13 +52,14 @@ USER_AGENT = "Mozilla/5.0 (job-alert-script; personal use)"
 # NOTE: tenant / board names below are best-effort. If a company returns 0 jobs or an error,
 # verify its config using the instructions at the bottom of this file.
 COMPANIES = [
-    # --- Workday: {"type": "workday", "host": "<tenant>.wdN.myworkdayjobs.com", "tenant": "...", "site": "..."}
-    {"name": "adidas",              "type": "workday", "host": "adidas.wd3.myworkdayjobs.com",        "tenant": "adidas",        "site": "adidas_careers"},
-    {"name": "Puma",                "type": "workday", "host": "puma.wd3.myworkdayjobs.com",          "tenant": "puma",          "site": "puma_careers"},
+    # --- Workday: {"type": "workday", "host": "<tenant>.wdN.myworkdayjobs.com", "tenant": "...", "site": "...", "query": "student"}
+    #     "query" is optional; it is only used to keep large boards (thousands of jobs) manageable.
+    {"name": "adidas",              "type": "workday", "host": "adidas.wd3.myworkdayjobs.com",        "tenant": "adidas",        "site": "adidas_careers", "query": "student"},
+    {"name": "Puma",                "type": "workday", "host": "puma.wd3.myworkdayjobs.com",          "tenant": "puma",          "site": "puma_careers", "query": "student"},
     {"name": "Siemens Healthineers","type": "workday", "host": "siemenshealthineers.wd3.myworkdayjobs.com", "tenant": "siemenshealthineers", "site": "careers"},
-    {"name": "Infineon",            "type": "workday", "host": "infineon.wd3.myworkdayjobs.com",      "tenant": "infineon",      "site": "External"},
-    {"name": "Allianz",             "type": "workday", "host": "allianz.wd3.myworkdayjobs.com",       "tenant": "allianz",       "site": "External"},
-    {"name": "Brainlab",            "type": "workday", "host": "brainlab.wd3.myworkdayjobs.com",      "tenant": "brainlab",      "site": "Brainlab"},
+    {"name": "Infineon",            "type": "workday", "host": "infineon.wd3.myworkdayjobs.com",      "tenant": "infineon",      "site": "External", "query": "student"},
+    {"name": "Allianz",             "type": "workday", "host": "allianz.wd3.myworkdayjobs.com",       "tenant": "allianz",       "site": "External", "query": "student"},
+    {"name": "Brainlab",            "type": "workday", "host": "brainlab.wd3.myworkdayjobs.com",      "tenant": "brainlab",      "site": "Brainlab", "query": "student"},
 
     # --- Greenhouse: {"type": "greenhouse", "board": "<board token>"}
     {"name": "Celonis",             "type": "greenhouse", "board": "celonis"},
@@ -65,14 +75,60 @@ COMPANIES = [
     {"name": "Check24",             "type": "smartrecruiters", "company": "CHECK24"},
 
     # --- SAP SuccessFactors career sites (HTML scraping)
-    #     {"type": "successfactors", "base": "https://jobs.<company>.com", "query": "data"}
-    {"name": "Siemens",             "type": "successfactors", "base": "https://jobs.siemens.com",         "query": "data"},
-    {"name": "Schaeffler",          "type": "successfactors", "base": "https://jobs.schaeffler.com",      "query": "data"},
-    {"name": "Bosch",               "type": "successfactors", "base": "https://jobs.bosch.com",           "query": "data"},
-    {"name": "Continental",         "type": "successfactors", "base": "https://jobs.continental.com",     "query": "data"},
-    {"name": "Audi",                "type": "successfactors", "base": "https://jobs.audi.com",            "query": "data"},
-    {"name": "Deutsche Bahn",       "type": "successfactors", "base": "https://karriere.deutschebahn.com","query": "data"},
-    {"name": "SAP",                 "type": "successfactors", "base": "https://jobs.sap.com",             "query": "data"},
+    #     {"type": "successfactors", "base": "https://jobs.<company>.com", "query": "student"}
+    {"name": "Siemens",             "type": "successfactors", "base": "https://jobs.siemens.com",         "query": "student"},
+    {"name": "Schaeffler",          "type": "successfactors", "base": "https://jobs.schaeffler.com",      "query": "student"},
+    {"name": "Bosch",               "type": "successfactors", "base": "https://jobs.bosch.com",           "query": "student"},
+    {"name": "Continental",         "type": "successfactors", "base": "https://jobs.continental.com",     "query": "student"},
+    {"name": "Audi",                "type": "successfactors", "base": "https://jobs.audi.com",            "query": "student"},
+    {"name": "Deutsche Bahn",       "type": "successfactors", "base": "https://karriere.deutschebahn.com","query": "student"},
+    {"name": "SAP",                 "type": "successfactors", "base": "https://jobs.sap.com",             "query": "student"},
+
+    # =======================================================================
+    # STARTUPS / SCALE-UPS (Germany). ATS names are best-effort - verify if a
+    # company errors or returns 0 jobs (see notes at the bottom).
+    # =======================================================================
+    # --- Greenhouse
+    {"name": "GetYourGuide",        "type": "greenhouse", "board": "getyourguide"},
+    {"name": "HelloFresh",          "type": "greenhouse", "board": "hellofresh"},
+    {"name": "N26",                 "type": "greenhouse", "board": "n26"},
+    {"name": "Trade Republic",      "type": "greenhouse", "board": "traderepublic"},
+    {"name": "Contentful",          "type": "greenhouse", "board": "contentful"},
+    {"name": "DeepL",               "type": "greenhouse", "board": "deepl"},
+    {"name": "Helsing",             "type": "greenhouse", "board": "helsing"},
+    {"name": "Scalable Capital",    "type": "greenhouse", "board": "scalablecapital"},
+    {"name": "Taxfix",              "type": "greenhouse", "board": "taxfix"},
+    {"name": "Babbel",              "type": "greenhouse", "board": "babbel"},
+    {"name": "Raisin",              "type": "greenhouse", "board": "raisin"},
+    {"name": "Sennder",             "type": "greenhouse", "board": "sennder"},
+    {"name": "Forto",               "type": "greenhouse", "board": "forto"},
+    {"name": "Solaris",             "type": "greenhouse", "board": "solarisbank"},
+    {"name": "Konux",               "type": "greenhouse", "board": "konux"},
+    {"name": "Wefox",               "type": "greenhouse", "board": "wefox"},
+    {"name": "Holidu",              "type": "greenhouse", "board": "holidu"},
+    {"name": "Enpal",               "type": "greenhouse", "board": "enpal"},
+    {"name": "Aleph Alpha",         "type": "greenhouse", "board": "alephalpha"},
+
+    # --- Ashby: {"type": "ashby", "board": "<company slug>"}
+    {"name": "QuantCo",             "type": "ashby", "board": "quantco"},
+    {"name": "Parloa",              "type": "ashby", "board": "parloa"},
+    {"name": "Black Forest Labs",   "type": "ashby", "board": "blackforestlabs"},
+    {"name": "Merantix Momentum",   "type": "ashby", "board": "merantix"},
+
+    # --- Personio ATS (very common with German startups):
+    #     {"type": "personio", "company": "<subdomain of *.jobs.personio.de>"}
+    {"name": "FINN",                "type": "personio", "company": "finn"},
+    {"name": "Isar Aerospace",      "type": "personio", "company": "isaraerospace"},
+    {"name": "Agile Robots",        "type": "personio", "company": "agile-robots"},
+    {"name": "Freeletics",          "type": "personio", "company": "freeletics"},
+    {"name": "Limehome",            "type": "personio", "company": "limehome"},
+    {"name": "Paessler",            "type": "personio", "company": "paessler"},      # Nuremberg
+    {"name": "tado",                "type": "personio", "company": "tado"},
+
+    # --- SmartRecruiters
+    {"name": "Flix",                "type": "smartrecruiters", "company": "Flix"},
+    {"name": "Zalando",             "type": "smartrecruiters", "company": "Zalando"},
+    {"name": "Tier Mobility",       "type": "smartrecruiters", "company": "TIERMobility"},
 
     # --- Generic HTML (any page): give CSS selectors for the job cards
     #     "item": selector for one job card, "title": selector inside card (text),
@@ -93,7 +149,7 @@ def fetch_workday(c):
     url = f"https://{c['host']}/wday/cxs/{c['tenant']}/{c['site']}/jobs"
     jobs, offset, limit = [], 0, 20
     while True:
-        body = {"appliedFacets": {}, "limit": limit, "offset": offset, "searchText": "data"}
+        body = {"appliedFacets": {}, "limit": limit, "offset": offset, "searchText": c.get("query", "")}
         r = session.post(url, json=body, timeout=TIMEOUT)
         r.raise_for_status()
         data = r.json()
@@ -107,7 +163,7 @@ def fetch_workday(c):
                 "posted": p.get("postedOn", ""),
             })
         offset += limit
-        if offset >= data.get("total", 0) or offset > 300:
+        if offset >= data.get("total", 0) or offset > 1000:
             break
     return jobs
 
@@ -160,6 +216,39 @@ def fetch_smartrecruiters(c):
     return jobs
 
 
+def fetch_ashby(c):
+    url = f"https://api.ashbyhq.com/posting-api/job-board/{c['board']}"
+    r = session.get(url, timeout=TIMEOUT)
+    r.raise_for_status()
+    return [{
+        "id": f"{c['name']}:{j['id']}",
+        "title": j.get("title", ""),
+        "location": j.get("location", ""),
+        "url": j.get("jobUrl", ""),
+        "posted": j.get("publishedAt", ""),
+    } for j in r.json().get("jobs", [])]
+
+
+def fetch_personio(c):
+    """Personio career pages expose an XML feed at https://<company>.jobs.personio.de/xml"""
+    import xml.etree.ElementTree as ET
+    url = f"https://{c['company']}.jobs.personio.de/xml"
+    r = session.get(url, timeout=TIMEOUT, headers={"Accept": "application/xml"})
+    r.raise_for_status()
+    root = ET.fromstring(r.content)
+    jobs = []
+    for pos in root.iter("position"):
+        jid = (pos.findtext("id") or "").strip()
+        jobs.append({
+            "id": f"{c['name']}:{jid}",
+            "title": (pos.findtext("name") or "").strip(),
+            "location": (pos.findtext("office") or "").strip(),
+            "url": f"https://{c['company']}.jobs.personio.de/job/{jid}",
+            "posted": (pos.findtext("createdAt") or "").strip(),
+        })
+    return jobs
+
+
 def _get_html(url):
     r = session.get(url, timeout=TIMEOUT, headers={"Accept": "text/html"})
     r.raise_for_status()
@@ -191,7 +280,7 @@ def fetch_successfactors(c):
                 "posted": date.get_text(strip=True) if date else "",
             })
         start += len(rows)
-        if len(rows) < 25 or start > 300:
+        if len(rows) < 25 or start > 1000:
             break
         time.sleep(1)
     return jobs
@@ -227,6 +316,8 @@ FETCHERS = {
     "greenhouse": fetch_greenhouse,
     "lever": fetch_lever,
     "smartrecruiters": fetch_smartrecruiters,
+    "ashby": fetch_ashby,
+    "personio": fetch_personio,
 }
 
 # ---------------------------------------------------------------------------
@@ -234,12 +325,16 @@ FETCHERS = {
 # ---------------------------------------------------------------------------
 
 
+def is_data_role(job):
+    return any(k in job["title"].lower() for k in KEYWORDS)
+
+
 def matches(job):
     t = job["title"].lower()
     loc = job["location"].lower()
-    if not any(k in t for k in KEYWORDS):
-        return False
     if not any(k in t for k in ROLE_WORDS):
+        return False
+    if STRICT and not is_data_role(job):
         return False
     if LOCATION_WORDS and not any(k in loc for k in LOCATION_WORDS):
         return False
@@ -290,11 +385,15 @@ def main():
             seen.add(j["id"])
         time.sleep(1)  # be polite
 
+    # data-related roles first, then everything else
+    new_jobs.sort(key=lambda j: (not is_data_role(j), j["company"], j["title"]))
+
     print("\n" + "=" * 70)
     if not new_jobs:
         print("No new matching jobs.")
     for j in new_jobs:
-        print(f"[{j['company']} | {j['source']}] {j['title']}")
+        star = "[*] " if is_data_role(j) else ""
+        print(f"{star}[{j['company']} | {j['source']}] {j['title']}")
         print(f"    {j['location']}  {j['posted']}")
         print(f"    {j['url']}\n")
 
@@ -319,6 +418,8 @@ if __name__ == "__main__":
 #    - "boards-api.greenhouse.io/v1/boards/<x>"   -> greenhouse: board = x
 #    - "api.lever.co/v0/postings/<x>"             -> lever: company = x
 #    - "api.smartrecruiters.com/v1/companies/<x>" -> smartrecruiters: company = x
+#    - "api.ashbyhq.com/posting-api/job-board/<x>" or jobs.ashbyhq.com/<x> -> ashby: board = x
+#    - "<x>.jobs.personio.de" or "<x>.jobs.personio.com"                  -> personio: company = x
 #    - "jobs.<company>.com/search/?q=..." (SAP SuccessFactors) -> successfactors: base = "https://jobs.<company>.com"
 #    - anything else -> html: open the listing page, right-click a job card -> Inspect, and copy CSS selectors
 #      for the card, title, link and location. Pages that load jobs via JavaScript need Playwright instead.
