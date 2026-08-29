@@ -26,7 +26,7 @@ jobs:
           python ats_jobs.py > new_jobs.txt 2> scan.log
           cat scan.log
           cat new_jobs.txt
-          if grep -q "No new matching jobs" new_jobs.txt; then
+          if grep -q "NOTHING_TO_REPORT" new_jobs.txt; then
             echo "found=false" >> "$GITHUB_OUTPUT"
           else
             echo "found=true" >> "$GITHUB_OUTPUT"
@@ -43,7 +43,7 @@ jobs:
           password: ${{ secrets.MAIL_PASSWORD }}
           from: Job Alert <${{ secrets.MAIL_USERNAME }}>
           to: ${{ secrets.MAIL_TO }}
-          subject: "New Data Science student jobs - ${{ github.run_id }}"
+          subject: "Job alert: new / last 3 days / last 7 days"
           body: file://new_jobs.txt
 
       - name: Save seen-jobs state
